@@ -1,2 +1,2 @@
-# conventional-commits-git
-Git utility for viewing and creating conventional commits. `cc &lt;type> &lt;scope> [...message]`, `cc log`.
+# Conventional Commits Git Utility
+Git utility for viewing and creating conventional commits. `cc <type> <scope> [...message]`, `cc log`.
