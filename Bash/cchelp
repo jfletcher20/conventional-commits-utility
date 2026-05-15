@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+R=$'\033[0m'
+B=$'\033[1m'
+D=$'\033[2m'
+W=$'\033[97m'
+G=$'\033[90m'   # grey  — --flags
+O=$'\033[38;5;208m'  # orange — strings
+C=$'\033[36m'   # cyan  — <type> <scope>
+RD=$'\033[31m'  # red   — numbers
+GN=$'\033[32m'  # green
+MG=$'\033[35m'  # magenta
+
+echo ""
+echo "  ${B}${W}cc${R} — conventional commit toolkit"
+echo "  ${D}No args → git log. Known subcommand → that command.${R}"
+echo "  ${D}Otherwise, args are forwarded to${R} cc commit ${D}if type/scope/message are present.${R}"
+echo ""
+
+echo "  ${B}COMMANDS${R}"
+echo ""
+
+echo "  ${B}${W}cc log${R} [${RD}N${R}] [${G}--hashes${R}] [${G}--authorship${R}] [${G}--loose${R}] [${G}--advanced${R}] ${D}[git-log-args...]${R}"
+echo "    ${D}Pretty-print git log with conventional commit coloring.${R}"
+echo "      ${RD}N${R}                 ${D}Show last N commits (default: all)${R}"
+echo "      ${G}--hashes${R}          ${D}Show commit hash on the authorship line${R}"
+echo "      ${G}--authorship${R}      ${D}Show \"By <author> · <date>\" line per commit${R}"
+echo "      ${G}--loose${R}           ${D}Two-line format: type/scope then description${R}"
+echo "      ${G}--advanced${R}        ${D}Interactive TUI pager (j/k scroll, a/h/l toggles, ? help)${R}"
+echo ""
+
+echo "  ${B}${W}cc commit${R} [${G}--staged${R}|${G}--all${R}] [${G}-p${R}[${D}=args${R}]] ${C}<type>${R} ${C}<scope>${R} ${O}<message...>${R}"
+echo "    ${D}Create a conventional commit.${R}"
+echo "      ${C}<type>${R}            ${D}Commit type (feat, fix, chore, refactor, docs, …) — tab-completes${R}"
+echo "      ${C}<scope>${R}           ${D}Commit scope — tab-completes from history${R}"
+echo "      ${O}<message...>${R}      ${D}Description — all remaining args joined by space${R}"
+echo "      ${G}--staged${R}          ${D}Commit only already-staged files, no prompt${R}"
+echo "      ${G}--all${R}             ${D}Stage all files then commit, no prompt${R}"
+echo "      ${G}-p${R}|${G}--p${R}|${G}-push${R}|${G}--push${R}  ${D}Push after committing (calls ccpush)${R}"
+echo "      ${G}-p=${O}\"arg1 arg2\"${R}  ${D}Push with custom git push args (string or ${R}${G}-p=${O}[arg1, arg2]${R}${D} array)${R}"
+echo "    ${D}No flags: nothing staged → stages all and commits immediately.${R}"
+echo "    ${D}         files staged  → shows staged ${GN}+green${R}${D} vs unstaged ${RD}~red${R}"
+echo "    ${D}                         prompts: ${R}${B}y${R}${D} commit staged  /  ${R}${B}a${R}${D} add unstaged  /  ${R}${B}c${R}${D} cancel${R}"
+echo ""
+
+echo "  ${B}${W}cc push${R} [${G}-f${R}] ${D}[git-push-args...]${R}"
+echo "    ${D}Push the current branch. Calls${R} git push origin HEAD -u ${D}by default,${R}"
+echo "    ${D}or${R} git push ${D}with any provided args.${R}"
+echo "      ${G}-f${R}                ${D}Force push safely using${R} --force-with-lease"
+echo "      ${G}--force${R}           ${D}Force push (destructive, bypasses lease check)${R}"
+echo ""
+
+echo "  ${B}${W}cc help${R}"
+echo "    ${D}Show this help.${R}"
+echo ""
+
+echo "  ${B}EXAMPLE${R}"
+echo ""
+echo "  ${D}\$${R} ${B}${W}cc${R} ${C}feat${R} ${C}auth${R} ${O}add google sign-in support${R}"
+echo "  ${D}→ git commit -m ${O}\"feat(auth): add google sign-in support\"${R}"
+echo ""
+echo "  ${D}\$${R} ${B}${W}cc${R} ${C}feat${R} ${C}auth${R} ${O}add google sign-in support${R} ${G}-p${R}"
+echo "  ${D}→ git commit -m ${O}\"feat(auth): add google sign-in support\"${R}${D} && git push origin HEAD -u${R}"
+echo ""

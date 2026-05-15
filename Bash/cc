@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# No args → log
+if [[ $# -eq 0 ]]; then
+  cclog; exit $?
+fi
+
+# Known subcommands
+case "$1" in
+  log)    shift; cclog "$@"; exit $? ;;
+  commit) shift; cccommit "$@"; exit $? ;;
+  push)   shift; ccpush "$@"; exit $? ;;
+  help)   shift; cchelp "$@"; exit $? ;;
+esac
+
+# Count non-flag positional args to determine if there's enough for a commit
+positional=0
+for arg in "$@"; do
+  case "$arg" in
+    --staged|--all|-p|--p|-push|--push|-f|--force|-p=*|--p=*|-push=*|--push=*) ;;
+    -*) ;;
+    *) (( positional++ )) ;;
+  esac
+done
+
+# type + scope + at least one message word = 3 positional args
+if [[ $positional -ge 3 ]]; then
+  cccommit "$@"
+else
+  cchelp
+fi

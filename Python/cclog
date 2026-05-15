@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+import subprocess, sys, re, io, os, shutil, textwrap
+
+R      = '\033[0m'
+WHITE  = '\033[97m'
+YELL   = '\033[33m'
+LGREY  = '\033[90m'
+GREEN  = '\033[32m'
+AQUA   = '\033[36m'
+DIM    = '\033[2m'
+BOLD   = '\033[1m'
+RED    = '\033[31m'
+ORANGE = '\033[38;5;208m'
+MAGENTA= '\033[35m'
+
+def type_color(ctype):
+    if ctype in ('chore', 'build'):
+        return RED
+    if ctype == 'fix':
+        return ORANGE
+    if ctype == 'feat':
+        return MAGENTA
+    if ctype == 'refactor':
+        return '\033[34m'  # blue
+    if ctype == 'docs':
+        return LGREY
+    return GREEN
+
+def bump_channel(version_str):
+    """Return 'alpha', 'beta', or 'release' based on version string."""
+    if 'alpha' in version_str:
+        return 'alpha'
+    if 'beta' in version_str:
+        return 'beta'
+    return 'release'
+
+def channel_color(channel):
+    return RED if channel == 'alpha' else MAGENTA if channel == 'beta' else GREEN
+
+def colorize_version(version_str):
+    """Colorize a version string like v1.2.3-alpha.1+456.
+    v1.2.3 → default color, alpha|beta → channel color, .N and +BUILD → orange.
+    """
+    m = re.match(r'^(v[\d.]+)(?:-(alpha|beta)((?:\.\d+)*)(\+\d+)?)?(.*)$', version_str.strip())
+    if not m:
+        return version_str
+    base, pre_type, pre_nums, build, rest = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+    if not pre_type:
+        return base  # just plain version number, no color
+    cc = channel_color(pre_type)
+    # pre_nums like ".0" or ".0.1" → grey dots, orange digits
+    num_str = re.sub(r'(\.)(\d+)', lambda m: f'{LGREY}{m.group(1)}{R}{ORANGE}{m.group(2)}{R}', pre_nums) if pre_nums else ''
+    # build like "+123" → grey +, orange digits
+    build_str = f'{LGREY}+{R}{ORANGE}{build[1:]}{R}' if build else ''
+    rest_str  = f'{ORANGE}{rest}{R}' if rest else ''
+    return f'{base}{LGREY}-{R}{cc}{pre_type}{R}{num_str}{build_str}{rest_str}'
+
+def colorize_ref(part):
+    if part.startswith('HEAD'):
+        return f'{BOLD}{WHITE}{part}{R}'
+    elif part.startswith('tag:'):
+        tag_val = part[4:].strip()
+        if re.match(r'v?\d+', tag_val):
+            tc = channel_color(bump_channel(tag_val))
+            return f'{tc}tag{R}{LGREY}:{R} {colorize_version(tag_val)}'
+        return f'{YELL}{part}{R}'
+    elif part.startswith('origin/'):
+        return f'{YELL}{part}{R}'
+    else:
+        return f'{GREEN}{part}{R}'
+
+def refs_inline(refs_raw):
+    """Comma-separated refs on a single colored string."""
+    inner = refs_raw.strip().lstrip('(').rstrip(')')
+    if not inner:
+        return ''
+    parts = [p.strip() for p in inner.split(',')]
+    return f'{DIM},{R} '.join(colorize_ref(p) for p in parts)
+
+def refs_lines(refs_raw):
+    """One colored string per ref, trailing comma except on last."""
+    inner = refs_raw.strip().lstrip('(').rstrip(')')
+    if not inner:
+        return []
+    parts = [p.strip() for p in inner.split(',')]
+    result = []
+    for i, part in enumerate(parts):
+        trailing = f'{DIM},{R}' if i < len(parts) - 1 else ''
+        result.append(colorize_ref(part) + trailing)
+    return result
+
+def parse_bump(subject):
+    """Detect [bump] vX.Y.Z[-alpha|beta...] subjects."""
+    m = re.match(r'^\[bump\]\s+(\S+)$', subject.strip())
+    return m.group(1) if m else None
+
+def parse_release(subject):
+    """Detect [vX.Y.Z] Name or [vX.Y.Z-suffix] Name subjects.
+    Returns (version_str, name) or None."""
+    m = re.match(r'^\[(v\d+\.\d+\.\d+(?:-[\w.-]+)?)\]\s*(.*)$', subject.strip())
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+def parse_merge(subject):
+    """Return (into, frm, pr) tuple if subject is a merge commit, else None."""
+    m = re.match(r"^Merge branch '([^']+)' into (.+)$", subject)
+    if m:
+        return (m.group(2).strip(), m.group(1).strip(), None)
+    m = re.match(r"^Merge remote-tracking branch '([^']+)' into (.+)$", subject)
+    if m:
+        return (m.group(2).strip(), m.group(1).strip(), None)
+    m = re.match(r"^Merge branch '([^']+)'$", subject)
+    if m:
+        return (None, m.group(1).strip(), None)
+    m = re.match(r"^Merge pull request #(\d+) from (.+)$", subject)
+    if m:
+        return (None, m.group(2).strip(), m.group(1))
+    return None
+
+def highlight_backticks(text):
+    return re.sub(r'`([^`]+)`', lambda m: f'`{BOLD}{m.group(1)}\033[22m`', text)
+
+def trim_scope(scope):
+    return scope[:15] + '…' if scope and len(scope) > 16 else scope
+
+def parse_records(raw):
+    records = []
+    for record in raw.split('\x1e'):
+        record = record.strip('\n')
+        if not record:
+            continue
+        parts = record.split('\x1f', 4)
+        if len(parts) < 5:
+            continue
+        short_hash, refs, author, date, message = parts
+        refs    = refs.strip()
+        message = message.strip()
+        lines   = message.splitlines()
+        subject = lines[0] if lines else ''
+
+        body = lines[1:]
+        while body and not body[0].strip():
+            body = body[1:]
+        while body and not body[-1].strip():
+            body = body[:-1]
+
+        m = re.match(r'^([\w][\w-]*)(?:\(([^)]*)\))?!?:\s*(.+)$', subject)
+        cc = None
+        if m:
+            ctype = m.group(1)
+            scope = trim_scope(m.group(2)) if m.group(2) else None
+            desc  = m.group(3)
+            cc    = (ctype, scope, desc)
+
+        merge   = parse_merge(subject)   if not cc else None
+        bump    = parse_bump(subject)    if not cc and not merge else None
+        release = parse_release(subject) if not cc and not merge and not bump else None
+
+        records.append(dict(
+            hash=short_hash, refs=refs,
+            author=author, date=date,
+            subject=subject, body=body, cc=cc, merge=merge, bump=bump, release=release,
+        ))
+    return records
+
+def cc_prefix_len(cc):
+    ctype, scope, _ = cc
+    return len(ctype) + 2 + (2 + len(scope) if scope else 0)
+
+def run(args, show_hash, show_authorship, loose):
+    fmt = '%x1e%h%x1f%d%x1f%an%x1f%ad%x1f%B'
+    result = subprocess.run(
+        ['git', 'log', f'--format={fmt}', '--date=format:%b %d, %Y'] + args,
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        sys.exit(result.returncode)
+
+    records = parse_records(result.stdout)
+    if not records:
+        return
+
+    max_width = max((cc_prefix_len(r['cc']) for r in records if r['cc']), default=0)
+
+    for i, r in enumerate(records):
+        cc   = r['cc']
+        refs = r['refs']
+        rlines = refs_lines(refs)
+
+        # blank line before a branch-change block (not before the very first)
+        if rlines and i > 0:
+            print()
+
+        # refs — unindented, one per line (same in both modes)
+        for line in rlines:
+            print(line)
+
+        if cc:
+            ctype, scope, desc = cc
+            tc   = type_color(ctype)
+            desc = highlight_backticks(desc)
+            type_len  = len(ctype) + 2  # [type]
+            scope_len = len(scope) if scope else 0
+            if scope:
+                gap        = max(max_width - type_len - scope_len, 1)
+                scope_part = ' ' * gap + f'{AQUA}{scope}{R}'
+            else:
+                scope_part = ' ' * (max_width - type_len)
+            if loose:
+                print(f' [{tc}{ctype}{R}]{scope_part}')
+                print(f' {desc}')
+            else:
+                print(f' [{tc}{ctype}{R}]{scope_part}  {LGREY}·{R}  {desc}')
+        elif r['release']:
+            ver, name = r['release']
+            tc  = channel_color(bump_channel(ver))
+            name_str = f'  {name}' if name else ''
+            print(f' {LGREY}[{R}{tc}{BOLD}{ver}{R}{LGREY}]{R}{name_str}')
+        elif r['bump']:
+            ver = r['bump']
+            tc  = channel_color(bump_channel(ver))
+            print(f' [{tc}bump{R}] {colorize_version(ver)}')
+        elif r['merge']:
+            into, frm, pr = r['merge']
+            into_str = f'{colorize_ref(into)} ' if into else ''
+            pr_str   = f'{YELL}#{pr}{R} ' if pr else ''
+            print(f' {YELL}⎇{R}  {into_str}{pr_str}{LGREY}⇐{R} {colorize_ref(frm)}')
+        else:
+            print(f' {r["subject"]}')
+
+        if r['body']:
+            cols = shutil.get_terminal_size().columns
+            wrap_width = max(20, cols - 4)  # 4 = len(' | ')
+            for line in r['body']:
+                if not line.strip():
+                    print(f' \033[30m |\033[90m{R}')
+                else:
+                    chunks = textwrap.wrap(line, width=wrap_width, break_long_words=False, break_on_hyphens=False) or [line]
+                    for j, chunk in enumerate(chunks):
+                        prefix = ' |' if j == 0 else ' ⤷'
+                        print(f' \033[30m{prefix}\033[90m {highlight_backticks(chunk)}{R}')
+
+        if show_hash or show_authorship:
+            dot = f'{LGREY} · {R}'
+            parts = []
+            if show_hash:
+                parts.append(f'{DIM}{r["hash"]}{R}')
+            if show_authorship:
+                parts.append(f'{LGREY}By {BOLD}{r["author"]}{R}')
+                parts.append(f'{LGREY}{r["date"]}{R}')
+            print(f' {dot.join(parts)}')
+
+        if loose:
+            print()
+
+def run_pager(args, show_hash, show_authorship, loose):
+    import tty, termios, select
+
+    s = dict(hash=show_hash, authorship=show_authorship, loose=loose, scroll=0, lines=[])
+
+    def render():
+        buf = io.StringIO()
+        _out, sys.stdout = sys.stdout, buf
+        run(args, s['hash'], s['authorship'], s['loose'])
+        sys.stdout = _out
+        s['lines'] = buf.getvalue().splitlines()
+
+    def clamp():
+        s['scroll'] = max(0, min(s['scroll'], max(0, len(s['lines']) - (rows - 1))))
+
+    def status_bar():
+        def tog(key, label, active):
+            on  = f'\033[0m\033[97m\033[1m{key}\033[0m\033[7m'
+            off = f'\033[2m{key}\033[0m\033[7m'
+            return f'{on if active else off} {label}'
+        return (
+            '\033[7m  '
+            + tog('a', 'authorship', s['authorship']) + '   '
+            + tog('h', 'hashes',     s['hash'])       + '   '
+            + tog('l', 'loose',      s['loose'])
+            + '   \033[2mq\033[0m\033[7m quit  \033[0m'
+        )
+
+    HELP = [
+        '',
+        '  \033[1mcclog — keyboard controls\033[0m',
+        '',
+        '  \033[97mj\033[0m / \033[97m↓\033[0m / \033[97mEnter\033[0m   scroll down',
+        '  \033[97mk\033[0m / \033[97m↑\033[0m          scroll up',
+        '  \033[97mSpace\033[0m            page down',
+        '  \033[97mb\033[0m                page up',
+        '  \033[97mg\033[0m                top',
+        '  \033[97mG\033[0m                bottom',
+        '',
+        '  \033[97ma\033[0m                toggle authorship',
+        '  \033[97mh\033[0m                toggle hashes',
+        '  \033[97ml\033[0m                toggle loose/compact',
+        '',
+        '  \033[97m?\033[0m                this help',
+        '  \033[97mq\033[0m / \033[97mCtrl+C\033[0m      quit',
+        '',
+        '  \033[2mpress any key to close\033[0m',
+        '',
+    ]
+
+    def draw_help():
+        sys.stdout.write('\033[H\033[2J')
+        sys.stdout.write('\r\n'.join(HELP))
+        sys.stdout.flush()
+
+    def draw():
+        visible = s['lines'][s['scroll']:s['scroll'] + rows - 1]
+        sys.stdout.write(
+            '\033[H\033[2J'
+            + '\r\n'.join(visible)
+            + f'\033[{rows};1H'
+            + status_bar()
+        )
+        sys.stdout.flush()
+
+    def read_key():
+        key = sys.stdin.read(1)
+        if key == '\x1b' and select.select([sys.stdin], [], [], 0.05)[0]:
+            ch1 = sys.stdin.read(1)
+            if ch1 == '[' and select.select([sys.stdin], [], [], 0.05)[0]:
+                ch2 = sys.stdin.read(1)
+                if ch2 in ('5', '6') and select.select([sys.stdin], [], [], 0.05)[0]:
+                    sys.stdin.read(1)  # consume trailing ~
+                    return 'pgdn' if ch2 == '6' else 'pgup'
+                return {'A': 'up', 'B': 'dn'}.get(ch2, '')
+        return key
+
+    rows = shutil.get_terminal_size().lines
+    render()
+
+    fd  = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    sys.stdout.write('\033[?1049h\033[?25l')
+    sys.stdout.flush()
+    try:
+        tty.setraw(fd)
+        draw()
+        while True:
+            key = read_key()
+            if key in ('q', '\x03', '\x04'):
+                break
+            elif key == 'a':
+                s['authorship'] = not s['authorship']; render(); clamp(); draw()
+            elif key == 'h':
+                s['hash'] = not s['hash']; render(); clamp(); draw()
+            elif key == 'l':
+                s['loose'] = not s['loose']; render(); clamp(); draw()
+            elif key in ('j', '\r', '\n', 'dn'):
+                s['scroll'] += 1; clamp(); draw()
+            elif key in ('k', 'up'):
+                s['scroll'] -= 1; clamp(); draw()
+            elif key in (' ', 'pgdn'):
+                s['scroll'] += rows - 1; clamp(); draw()
+            elif key in ('b', 'pgup'):
+                s['scroll'] -= rows - 1; clamp(); draw()
+            elif key == 'g':
+                s['scroll'] = 0; draw()
+            elif key == 'G':
+                s['scroll'] = max(0, len(s['lines']) - (rows - 1)); draw()
+            elif key == '?':
+                draw_help()
+                read_key()
+                draw()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write('\033[?1049l\033[?25h')
+        sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    raw_args = sys.argv[1:]
+    show_hash       = '--hashes'      in raw_args
+    show_authorship = '--authorship'  in raw_args
+    loose           = '--loose'       in raw_args
+    advanced        = '--advanced'    in raw_args
+    no_pager        = '--no-pager'    in raw_args
+    known_flags = ('--hashes', '--authorship', '--loose', '--advanced', '--no-pager')
+
+    # Extract --from=HASH and --to=HASH
+    from_hash = to_hash = None
+    args = []
+    for a in raw_args:
+        if a.startswith('--from='):
+            from_hash = a.split('=', 1)[1]
+        elif a.startswith('--to='):
+            to_hash = a.split('=', 1)[1]
+        elif a not in known_flags:
+            args.append(a)
+
+    # --from/--to → git range (from exclusive, to inclusive)
+    if from_hash and to_hash:
+        args.append(f'{from_hash}..{to_hash}')
+    elif from_hash:
+        args.append(f'{from_hash}..HEAD')
+    elif to_hash:
+        args.append(to_hash)
+
+    if args and re.fullmatch(r'\d+', args[0]):
+        args = [f'-{args[0]}'] + args[1:]
+
+    if no_pager or not sys.stdout.isatty():
+        run(args, show_hash, show_authorship, loose)
+    elif advanced:
+        run_pager(args, show_hash, show_authorship, loose)
+    else:
+        buf = io.StringIO()
+        sys.stdout = buf
+        run(args, show_hash, show_authorship, loose)
+        sys.stdout = sys.__stdout__
+        pager = os.environ.get('PAGER', 'less')
+        subprocess.run([pager, '-R'], input=buf.getvalue(), text=True)

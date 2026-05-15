@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+
+GREEN='\033[32m'
+RED='\033[31m'
+GREY='\033[90m'
+BOLD='\033[1m'
+DIM='\033[2m'
+R='\033[0m'
+
+staged_only=false
+all_files=false
+do_push=false
+push_args=()
+args=()
+
+for arg in "$@"; do
+  case "$arg" in
+    --staged) staged_only=true ;;
+    --all)    all_files=true ;;
+    -p|-push|--p|--push)
+      do_push=true
+      ;;
+    -p=*|-push=*|--p=*|--push=*)
+      do_push=true
+      val="${arg#*=}"
+      if [[ "$val" == \[*\] ]]; then
+        # Array format: [arg1, arg2, arg3]
+        val="${val#[}"; val="${val%]}"
+        IFS=', ' read -ra push_args <<< "$val"
+      else
+        # String format: "arg1 arg2 arg3"
+        read -ra push_args <<< "$val"
+      fi
+      ;;
+    *) args+=("$arg") ;;
+  esac
+done
+
+if [[ ${#args[@]} -lt 3 ]]; then
+  echo "Usage: cccommit <type> <scope> <message...>" >&2
+  exit 1
+fi
+
+ctype="${args[0]}"
+scope="${args[1]}"
+commit_msg="${ctype}(${scope}): ${args[*]:2}"
+
+do_commit() {
+  git commit -m "$commit_msg"
+}
+
+maybe_push() {
+  $do_push && ccpush "${push_args[@]}"
+}
+
+if $staged_only; then
+  do_commit && maybe_push; exit $?
+fi
+
+if $all_files; then
+  git add -A; do_commit && maybe_push; exit $?
+fi
+
+# ── Gather file lists ─────────────────────────────────────────────────────────
+
+staged_files=$(git diff --cached --name-status 2>/dev/null)
+unstaged_files=$(git diff --name-status 2>/dev/null)
+untracked_files=$(git ls-files --others --exclude-standard 2>/dev/null)
+
+# No staged files → stage everything and commit immediately
+if [[ -z "$staged_files" ]]; then
+  git add -A
+  do_commit && maybe_push; exit $?
+fi
+
+# ── Show staged (green) and unstaged/untracked (red) ─────────────────────────
+
+status_symbol() {
+  case "$1" in
+    A) echo "+" ;;
+    M) echo "~" ;;
+    D) echo "-" ;;
+    R*) echo "→" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+echo ""
+while IFS=$'\t' read -r st file _rest; do
+  [[ -z "$st" ]] && continue
+  sym=$(status_symbol "$st")
+  printf "  ${GREEN}%s %s${R}\n" "$sym" "$file"
+done <<< "$staged_files"
+
+while IFS=$'\t' read -r st file _rest; do
+  [[ -z "$st" ]] && continue
+  sym=$(status_symbol "$st")
+  printf "  ${RED}%s %s${R}\n" "$sym" "$file"
+done <<< "$unstaged_files"
+
+while IFS= read -r file; do
+  [[ -z "$file" ]] && continue
+  printf "  ${RED}? %s${R}\n" "$file"
+done <<< "$untracked_files"
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+
+echo ""
+printf "  ${BOLD}y${R}${DIM} commit staged${R}   ${BOLD}a${R}${DIM} add unstaged${R}   ${BOLD}c${R}${DIM} cancel${R}  "
+
+read -r -n 1 key
+echo ""
+echo ""
+
+case "$key" in
+  y|Y) do_commit && maybe_push ;;
+  a|A) git add -A; do_commit && maybe_push ;;
+  c|C|$'\x03'|"") printf "${DIM}cancelled${R}\n" >&2; exit 1 ;;
+  *) printf "${DIM}cancelled${R}\n" >&2; exit 1 ;;
+esac

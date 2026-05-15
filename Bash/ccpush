@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -f) args+=("--force-with-lease") ;;
+    *)          args+=("$arg") ;;
+  esac
+done
+
+if [[ ${#args[@]} -eq 0 ]]; then
+  git push origin HEAD -u
+else
+  git push "${args[@]}"
+fi
